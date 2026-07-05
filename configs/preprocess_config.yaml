@@ -1,0 +1,76 @@
+# ============================================================
+# EEG 数据预处理统一配置
+# 所有数据集 loader 共用此文件
+# ============================================================
+
+# ----------------------------------------------------------
+# 信号处理参数
+# ----------------------------------------------------------
+signal:
+  target_fs: 200        # 统一采样率 (Hz)，参考 REVE
+  lowcut: 0.5           # 带通滤波下限 (Hz)
+  highcut: 99.5         # 带通滤波上限 (Hz)
+  notch: 50             # 陷波频率 (Hz)，去除工频干扰
+  resample_method: "scipy"  # 重采样方法: "scipy" | "mne"
+
+# ----------------------------------------------------------
+# 归一化参数（参考 REVE 预处理）
+# ----------------------------------------------------------
+normalize:
+  method: "zscore"      # 归一化方法: "zscore" | "minmax" | "none"
+  clip_sigma: 15.0      # 极端值裁剪阈值（标准差倍数），REVE 使用 15σ
+  per_session: true     # 按每次记录独立计算统计量
+
+# ----------------------------------------------------------
+# 数据分段参数
+# ----------------------------------------------------------
+epoching:
+  window_sec: 10        # 窗口长度（秒）
+  overlap_pct: 0.0      # 重叠比例 (0.0-1.0)，0 表示不重叠
+  min_duration_sec: 30  # 最小有效时长（秒），短于此值的数据丢弃
+
+# ----------------------------------------------------------
+# 通道处理
+# ----------------------------------------------------------
+channels:
+  montage: "standard_1020"  # 标准蒙太奇名称 (MNE 内置)
+  on_missing: "zero"        # 缺失通道处理: "zero" | "interpolate" | "drop"
+  reference: null           # 重参考，null 表示保持原参考
+
+# ----------------------------------------------------------
+# 输出格式
+# ----------------------------------------------------------
+output:
+  format: "npy"         # 输出格式: "npy" | "h5" | "pt"
+  save_raw: false       # 是否保存预处理但未分段的数据
+  labels_file: "../data/labels.csv"  # 标签汇总文件路径（相对 preprocessing/）
+
+# ----------------------------------------------------------
+# 数据集特定配置（按需覆盖以上默认值）
+# ----------------------------------------------------------
+datasets:
+  modma:
+    file_pattern: "*.mat"
+    diagnosis_column: "label"   # 1=抑郁, 0=对照
+    channels: 128               # 128导联版本（也有3导联版，另行处理）
+
+  ieee_adhd:
+    file_pattern: "*.mat"
+    diagnosis_column: "label"   # 1=ADHD, 0=对照
+    channels: 19
+    original_fs: 128
+
+  mendeley_adhd:
+    file_pattern: "*.mat"
+    diagnosis_column: "label"
+    original_fs: null           # 待确认
+
+  openneuro_depression:
+    file_pattern: "*.set"
+    diagnosis_column: "group"   # 需根据实际 BIDS 标注确认
+    original_fs: null
+
+  tdbrain:
+    file_pattern: "*.csv"
+    diagnosis_column: "diagnosis"
+    original_fs: null
