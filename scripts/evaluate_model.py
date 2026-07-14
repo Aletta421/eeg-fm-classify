@@ -87,21 +87,25 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> dict:
     )
 
     # 如果 checkpoint 使用了自定义分类头，替换 final_layer
+    head_type = "linear"
     if exp_cfg is not None and hasattr(exp_cfg, 'training'):
         training_cfg = exp_cfg.training
         head_type = getattr(training_cfg, 'head_type', 'linear')
-        if head_type != 'linear':
-            from models.heads import create_head
-            print(f"  Head type: {head_type} (replacing final_layer)")
-            model.final_layer = create_head(
-                head_type,
-                in_features=512,
-                n_classes=n_outputs,
-            ).to(device)
 
+    if head_type != "linear":
+        from models.heads import create_head, SklearnHead
+        print(f"  Head type: {head_type} (replacing final_layer)")
+        model.final_layer = create_head(
+            head_type,
+            in_features=512,
+            n_classes=n_outputs,
+        ).to(device)
+
+    # 加载 state_dict（sklearn 头无参数，用 non-strict）
+    strict = not head_type.startswith("sklearn_")
     state_dict = ckpt["model_state_dict"]
     try:
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=strict)
     except RuntimeError as e:
         print(f"  ⚠ Strict load failed, trying non-strict: {e}")
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -109,6 +113,17 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> dict:
             print(f"  Missing keys: {len(missing)}")
         if unexpected:
             print(f"  Unexpected keys: {len(unexpected)}")
+
+    # sklearn 头：加载 joblib 模型
+    if head_type.startswith("sklearn_"):
+        import joblib
+        joblib_path = Path(checkpoint_path).parent / "sklearn_head.joblib"
+        if joblib_path.exists():
+            model.final_layer.clf = joblib.load(str(joblib_path))
+            model.final_layer._fitted = True
+            print(f"  Loaded sklearn model: {joblib_path}")
+        else:
+            print(f"  ⚠ sklearn_head.joblib not found at {joblib_path}")
 
     model = model.to(device)
     model.eval()

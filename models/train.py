@@ -602,6 +602,16 @@ class Trainer:
         except ImportError:
             logger.warning("joblib not installed, sklearn model not saved")
 
+        # 同时保存 best_model.pt（encoder 权重 + 配置，供 evaluate_model.py 加载）
+        torch.save({
+            "epoch": 1,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": {},
+            "metrics": test_metrics,
+            "config": self.config,
+        }, str(checkpoint_dir / "best_model.pt"))
+        logger.info(f"Encoder state saved → {checkpoint_dir / 'best_model.pt'}")
+
         final_info = {
             "best_epoch": 1,
             "best_train_metric": train_metrics["balanced_acc"],
