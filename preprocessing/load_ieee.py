@@ -139,6 +139,10 @@ def main():
         "--config", type=str, default="../configs/preprocess_config.yaml",
         help="配置文件路径",
     )
+    parser.add_argument("--skip_epoching", action="store_true",
+                        help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
+    parser.add_argument("--epoch_only", action="store_true",
+                        help="只对已有连续数据执行 Step 7 分段，不重新预处理")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -153,6 +157,13 @@ def main():
     }
 
     loader = IEEELoader(args.config)
+
+    # --epoch_only 模式：只对已有连续数据分段
+    if args.epoch_only:
+        print(f"Step 7 分段模式: {output_dir}")
+        loader.epoch_output_dir(str(output_dir))
+        print(f"\n✓ 分段完成")
+        return
 
     total_files = 0
     total_subjects = 0
@@ -171,7 +182,7 @@ def main():
 
         for f in mat_files:
             try:
-                result = loader.process(str(f))
+                result = loader.process(str(f), skip_epoching=args.skip_epoching)
                 subj_id = result["meta"]["subject_id"]
                 out_subj_dir = output_dir / subdir_name / subj_id
                 loader.save(result, str(out_subj_dir))

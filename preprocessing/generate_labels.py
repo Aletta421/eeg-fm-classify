@@ -28,6 +28,7 @@ COLUMNS = [
     "subject_id",
     "dataset",
     "label",              # 0=对照, 1=患者
+    "split",              # "train" / "test" / "holdout" (由 split_data.py 确定)
     "file_path",          # 预处理后 .npy 文件路径
     "n_epochs",           # 分段数
     "n_channels",
@@ -73,11 +74,17 @@ def scan_processed(data_dir: Path) -> List[Dict]:
         except Exception:
             n_epochs, n_channels, n_samples = 0, meta.get("n_channels", 0), 0
 
+        # file_path 相对于项目根目录（data_dir.parent.parent）
+        try:
+            file_path = str(eeg_file.relative_to(data_dir.parent.parent).as_posix())
+        except ValueError:
+            file_path = str(eeg_file.relative_to(data_dir.parent).as_posix())
+
         record = {
             "subject_id": meta["subject_id"],
             "dataset": meta.get("dataset", "unknown"),
             "label": meta.get("label", -1),
-            "file_path": str(eeg_file.relative_to(data_dir.parent).as_posix()),
+            "file_path": file_path,
             "n_epochs": n_epochs,
             "n_channels": n_channels,
             "n_samples": n_samples,
@@ -90,6 +97,27 @@ def scan_processed(data_dir: Path) -> List[Dict]:
         records.append(record)
 
     return records
+
+
+def load_splits(splits_path: Path) -> dict:
+    """读取 split 文件，返回 {subject_id: split_name} 映射。"""
+    if not splits_path.exists():
+        print(f"⚠ 未找到 split 文件: {splits_path}，split 列将为空")
+        return {}
+
+    with open(splits_path, "r", encoding="utf-8") as f:
+        splits_data = json.load(f)
+
+    mapping = {}
+    for split_name in ["train", "test", "holdout"]:
+        for sid in splits_data.get(split_name, []):
+            mapping[sid] = split_name
+
+    print(f"✓ 已加载 split 文件: {len(mapping)} 个受试者 "
+          f"(train={len(splits_data.get('train',[]))}, "
+          f"test={len(splits_data.get('test',[]))}, "
+          f"holdout={len(splits_data.get('holdout',[]))})")
+    return mapping
 
 
 def main():
@@ -108,10 +136,17 @@ def main():
         default="../data/labels.csv",
         help="输出 CSV 文件路径",
     )
+    parser.add_argument(
+        "--splits",
+        type=str,
+        default="../data/splits.json",
+        help="split 文件路径（由 split_data.py 生成）",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     output_path = Path(args.output)
+    splits_path = Path(args.splits)
 
     print(f"扫描 {data_dir} ...")
     records = scan_processed(data_dir)
@@ -119,6 +154,13 @@ def main():
     if not records:
         print("未找到任何记录，请先运行数据集 loader")
         return
+
+    # 加载 split 信息
+    split_mapping = load_splits(splits_path)
+
+    # 为每条记录填充 split 列
+    for record in records:
+        record["split"] = split_mapping.get(record["subject_id"], "")
 
     df = pd.DataFrame(records, columns=COLUMNS)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +176,10 @@ def main():
     for label, count in df["label"].value_counts().sort_index().items():
         label_name = {0: "对照", 1: "患者"}.get(label, "未知")
         print(f"    {label} ({label_name}): {count}")
+    print(f"  Split 分布:")
+    for split_name, count in df["split"].value_counts().items():
+        label = split_name if split_name else "(未分配)"
+        print(f"    {label}: {count}")
 
 
 if __name__ == "__main__":

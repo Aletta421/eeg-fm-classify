@@ -2,7 +2,25 @@
 EEG 数据集加载器基类
 
 所有数据集 loader 必须继承此类，实现统一的输入输出接口。
-参考: task.md Step 1-7, REVE 预处理流程
+
+7-Step 预处理流程:
+  1. 重采样 → 200 Hz
+  2. 带通滤波 0.5-99.5 Hz (4阶 Butterworth)
+  3. 陷波滤波 50 Hz (IIR Notch)
+  4. Z-score 归一化 (per recording, per channel)
+  5. 极端值裁剪 ±15σ
+  6. 确定 80% train / 20% test split (按受试者分层, split_data.py)
+  7. 滑窗分段 10s (2000 samples, 无重叠)
+
+两阶段预处理:
+    # 阶段 1: 信号处理 (Step 1-5), 跳过分段
+    result = loader.process(file, skip_epoching=True)
+    loader.save(result, output_dir)   # 保存为 (n_channels, n_samples)
+
+    # 确定 split (Step 6) — 由 run_preprocess.py 调用 split_data.py
+
+    # 阶段 2: 滑窗分段 (Step 7)
+    loader.epoch_output_dir(output_dir)  # 加载连续数据 → 分段 → 保存
 
 使用方式:
     from preprocessing.base_loader import BaseEEGLoader
@@ -51,15 +69,21 @@ class BaseEEGLoader(ABC):
     # 公共接口（子类不要覆盖）
     # ================================================================
 
-    def process(self, file_path: str) -> Dict[str, Any]:
-        """完整处理流程：读取 → 滤波 → 重采样 → 归一化 → 分段。
+    def process(self, file_path: str, skip_epoching: bool = False) -> Dict[str, Any]:
+        """完整处理流程：读取 → 滤波 → 重采样 → 归一化 → (可选分段)。
+
+        两阶段预处理:
+          阶段 1: process(file, skip_epoching=True) → 只跑 Step 1-5
+          阶段 2: epoch_output_dir() → 加载连续数据, 跑 Step 7
 
         Args:
             file_path: 原始数据文件路径。
+            skip_epoching: 若为 True，跳过 Step 7 (滑窗分段)，返回连续数据。
+                           用于两阶段预处理：先跑 Step 1-5，确定 split，再跑 Step 7。
 
         Returns:
             {
-                "eeg": np.ndarray,          # (n_epochs, n_channels, n_samples)
+                "eeg": np.ndarray,          # (n_epochs, n_channels, n_samples) 或 (n_channels, n_samples)
                 "channels": list[str],       # 通道名称列表
                 "ch_positions": np.ndarray,  # (n_channels, 3) 3D坐标
                 "label": int,                # 0=对照, 1=患者
@@ -84,11 +108,14 @@ class BaseEEGLoader(ABC):
         # Step 3: 提取通道信息
         channels, ch_positions = self._extract_channels(raw_data, raw_meta)
 
-        # Step 4: 信号处理
+        # Step 1-5: 重采样/滤波/陷波/zscore/clip
         eeg = self._preprocess_signal(raw_data, raw_meta)
 
-        # Step 5: 分段
-        epochs = self._epoch(eeg)
+        # Step 7: 滑窗分段（可选跳过，用于两阶段预处理）
+        if skip_epoching:
+            epochs = eeg  # 返回连续数据 (n_channels, n_samples)
+        else:
+            epochs = self._epoch(eeg)  # 返回 (n_epochs, n_channels, n_samples)
 
         # 组装元数据
         meta = {
@@ -134,6 +161,76 @@ class BaseEEGLoader(ABC):
             save_meta["channels"] = result["channels"]
             save_meta["label"] = result["label"]
             json.dump(save_meta, f, indent=2, default=str, ensure_ascii=False)
+
+    def apply_epoching(self, continuous_data: np.ndarray) -> np.ndarray:
+        """对已预处理（step 1-5）的连续数据应用滑窗分段。
+
+        用于两阶段预处理流程：
+            阶段 1: process(file, skip_epoching=True) → save_continuous()
+            阶段 2: 确定 split → apply_epoching() → save()
+
+        Args:
+            continuous_data: (n_channels, n_samples) 连续 EEG 数据。
+
+        Returns:
+            (n_epochs, n_channels, window_samples) 分段后数据。
+        """
+        return self._epoch(continuous_data)
+
+    def save_continuous(self, result: Dict[str, Any], output_dir: str):
+        """保存未分段的连续预处理数据（两阶段预处理的中间产物）。
+
+        保存格式与 save() 相同，但 eeg 为 (n_channels, n_samples) 而非
+        (n_epochs, n_channels, n_samples)。后续可调用 epoch_output_dir() 完成分段。
+
+        Args:
+            result: process(file, skip_epoching=True) 返回的字典。
+            output_dir: 输出目录。
+        """
+        self.save(result, output_dir)
+
+    def epoch_output_dir(self, output_dir: str):
+        """Step 7: 对输出目录中所有连续数据进行滑窗分段。
+
+        扫描 output_dir 下所有 *_eeg.npy 文件:
+          - 若已是 3D (n_epochs, n_channels, n_samples) → 跳过
+          - 若是 2D (n_channels, n_samples) → 应用 _epoch() → 保存为 3D
+
+        用于两阶段预处理的阶段 2。
+
+        Args:
+            output_dir: 包含连续 *_eeg.npy 文件的目录。
+        """
+        import json
+
+        output_dir = Path(output_dir)
+        npy_files = sorted(output_dir.rglob("*_eeg.npy"))
+
+        epoched = 0
+        skipped = 0
+        for npy_path in npy_files:
+            data = np.load(str(npy_path), mmap_mode="r")
+            if data.ndim == 3:
+                skipped += 1
+                continue  # 已分段，跳过
+
+            # 加载全量数据并分段
+            data = np.array(data, dtype=np.float64)
+            epochs = self._epoch(data)  # (n_epochs, n_channels, window_samples)
+            np.save(str(npy_path), epochs.astype(np.float32))
+
+            # 更新 meta 文件中的 n_epochs
+            meta_path = npy_path.parent / f"{npy_path.stem.replace('_eeg', '')}_meta.json"
+            if meta_path.exists():
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta["n_epochs"] = int(epochs.shape[0])
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2, ensure_ascii=False)
+
+            epoched += 1
+
+        print(f"  [epoch_output_dir] {output_dir}: {epoched} 文件分段, {skipped} 跳过 (已分段)")
 
     # ================================================================
     # 子类必须实现的方法
@@ -198,25 +295,25 @@ class BaseEEGLoader(ABC):
     def _preprocess_signal(
         self, data: np.ndarray, meta: Dict[str, Any]
     ) -> np.ndarray:
-        """信号预处理流水线：重采样 → 滤波 → 归一化 → 裁剪。"""
+        """Step 1-5: 信号预处理流水线。"""
         original_fs = meta.get("fs", self.signal_cfg["target_fs"])
         target_fs = self.signal_cfg["target_fs"]
 
-        # 1. 重采样
+        # Step 1: 重采样
         if original_fs != target_fs:
             data = self._resample(data, original_fs, target_fs)
 
-        # 2. 滤波（0.5-99.5 Hz 带通）
+        # Step 2: 带通滤波 (0.5-99.5 Hz)
         data = self._bandpass_filter(data, target_fs)
 
-        # 3. 陷波滤波（去除工频干扰）
+        # Step 3: 陷波滤波 (50 Hz)
         data = self._notch_filter(data, target_fs)
 
-        # 4. Z-score 归一化
+        # Step 4: Z-score 归一化
         if self.norm_cfg["method"] == "zscore":
             data = self._zscore_normalize(data)
 
-        # 5. 裁剪极端值
+        # Step 5: 极端值裁剪 (±15σ)
         data = self._clip_extremes(data)
 
         return data
@@ -260,7 +357,7 @@ class BaseEEGLoader(ABC):
         return np.clip(data, -clip_val, clip_val)
 
     def _epoch(self, data: np.ndarray) -> np.ndarray:
-        """将连续数据分成固定窗口。"""
+        """Step 7: 滑窗分段 — 将连续数据切为固定窗口。"""
         window_samples = int(self.epoch_cfg["window_sec"] * self.signal_cfg["target_fs"])
         overlap = self.epoch_cfg["overlap_pct"]
         stride = int(window_samples * (1 - overlap))

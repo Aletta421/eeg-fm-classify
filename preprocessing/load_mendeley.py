@@ -112,11 +112,13 @@ class MendeleyLoader(BaseEEGLoader):
     def process_array(
         self, data: np.ndarray, subject_id: str, ch_names: List[str],
         label: int, diag_type: str, group: str, task_name: str,
+        skip_epoching: bool = False,
     ) -> Dict[str, Any]:
         """处理 (n_channels, n_samples) 的 EEG 数组。
 
         Args:
             data: (n_channels, n_samples)，经预处理前为原始 EEG。
+            skip_epoching: 若 True，跳过 Step 7 滑窗分段。
             ...（描述信息）
 
         Returns:
@@ -135,7 +137,11 @@ class MendeleyLoader(BaseEEGLoader):
 
         channels, ch_positions = self._extract_channels(data, raw_meta)
         eeg = self._preprocess_signal(data, raw_meta)
-        epochs = self._epoch(eeg)
+
+        if skip_epoching:
+            epochs = eeg  # 连续数据 (n_channels, n_samples)
+        else:
+            epochs = self._epoch(eeg)  # (n_epochs, n_channels, n_samples)
 
         meta = {
             "subject_id": subject_id,
@@ -171,6 +177,10 @@ def main():
                         help="预处理后输出目录")
     parser.add_argument("--config", type=str, default="../configs/preprocess_config.yaml",
                         help="配置文件路径")
+    parser.add_argument("--skip_epoching", action="store_true",
+                        help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
+    parser.add_argument("--epoch_only", action="store_true",
+                        help="只对已有连续数据执行 Step 7 分段，不重新预处理")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir) / "EEG"
@@ -185,6 +195,13 @@ def main():
     print(f"配置: target_fs=200 Hz, window=10s, zscore\n")
 
     loader = MendeleyLoader(args.config)
+
+    # --epoch_only 模式：只对已有连续数据分段
+    if args.epoch_only:
+        print(f"Step 7 分段模式: {output_dir}")
+        loader.epoch_output_dir(str(output_dir))
+        print(f"\n✓ 分段完成")
+        return
 
     total_subjects = 0
     total_files = 0
@@ -230,6 +247,7 @@ def main():
                     result = loader.process_array(
                         subj_data, subj_id, ch_names,
                         label, diag_type, fname, task_name,
+                        skip_epoching=args.skip_epoching,
                     )
 
                     out_dir = output_dir / task_name / subj_id

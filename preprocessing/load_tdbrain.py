@@ -233,6 +233,10 @@ def main():
                         help="处理的条件，逗号分隔 (默认: restEC,oddball)")
     parser.add_argument("--limit", type=int, default=0,
                         help="限制受试者数量 (0=全部)")
+    parser.add_argument("--skip_epoching", action="store_true",
+                        help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
+    parser.add_argument("--epoch_only", action="store_true",
+                        help="只对已有连续数据执行 Step 7 分段，不重新预处理")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -250,6 +254,13 @@ def main():
     print(f"{'='*60}")
 
     loader = TDBrainLoader(args.config, xlsx_path=args.xlsx)
+
+    # --epoch_only 模式：只对已有连续数据分段
+    if args.epoch_only:
+        print(f"Step 7 分段模式: {output_dir}")
+        loader.epoch_output_dir(str(output_dir))
+        print(f"\n✓ 分段完成")
+        return
 
     # 按 (subject_id, task) 组织
     from collections import defaultdict
@@ -285,7 +296,7 @@ def main():
 
         for task, bdf_path in subjects[sid].items():
             try:
-                result = loader.process(str(bdf_path))
+                result = loader.process(str(bdf_path), skip_epoching=args.skip_epoching)
                 out_dir = output_dir / sid / task
                 loader.save(result, str(out_dir))
                 total_files += 1
