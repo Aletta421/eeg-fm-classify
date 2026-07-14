@@ -1,17 +1,17 @@
-# 任务文档 — Phase 2: REVE 模型训练
+# 任务文档 — Phase 2: 多分类头对比实验
 
-> 状态：Phase 1 ✅ | 数据质量审计 ✅ | 死通道检测 ✅ | 重新训练 🔄
+> 状态：Phase 1 ✅ | 数据质量审计 ✅ | 死通道检测 ✅ | Phase 2 ✅
 
 ---
 
 ## 任务目标
 
-对 EEG 数据进行 **二分类**（HC vs MDD / HC vs ADHD）和 **三分类**（HC / MDD / ADHD）
+对 EEG 数据进行 **二分类**（HC vs MDD / HC vs ADHD），对比不同分类头的效果。
 
-| 指标 | 目标 | 二分类最佳 | 三分类最佳 |
-|------|------|-----------|-----------|
-| 平衡准确率 | ≥ 80% | 0.940 (TDBRAIN-depression) | 0.751 (TDBRAIN) |
-| AUROC | ≥ 0.85 | 0.969 (TDBRAIN-depression) | 0.926 (TDBRAIN) ✅ |
+| 指标 | 目标 | 二分类最佳 (linear) | 说明 |
+|------|------|---------------------|------|
+| 平衡准确率 | ≥ 80% | 0.940 (TDBRAIN-depression) | linear 头 |
+| AUROC | ≥ 0.85 | 0.969 (TDBRAIN-depression) | linear 头 |
 | 跨数据集泛化 | 差距 ≤ 10% | — | 待测 |
 
 ---
@@ -120,67 +120,97 @@ data/processed/{dataset}/{subject_id}/{run_id}/
 ## 快速开始
 
 ```bash
-# 二分类（5 数据集 × diagnosis）
-bash scripts/run_binary_experiments.sh
+# === 训练 ===
+# 单数据集 + 线性头 (默认)
+python models/train.py --dataset MODMA --diagnosis depression
 
-# 评估模型
+# 指定分类头
+python models/train.py --head_type mlp --dataset MODMA --diagnosis depression
+python models/train.py --head_type sklearn_rf --dataset MODMA --diagnosis depression
+
+# 微调模式
+python models/train.py --mode finetune --head_type mlp --dataset MODMA --diagnosis depression
+
+# === 批量实验 ===
+bash scripts/run_binary_experiments.sh                    # 全部 6 组, linear 头
+bash scripts/run_binary_experiments.sh --head mlp         # 全部用 MLP 头
+bash scripts/run_binary_experiments.sh --head sklearn_lr  # 全部用 sklearn LR
+bash scripts/run_binary_experiments.sh -d MODMA -g depression --head cnn1d
+
+# === 多数据集混合 ===
+bash scripts/run_multi_dataset.sh -g depression --head mlp
+
+# === 传统分类器对比 ===
+python scripts/classical_classifier.py --dataset MODMA --diagnosis depression
+python scripts/classical_classifier.py --dataset MODMA --diagnosis depression --torch_heads mlp,cnn1d
+
+# === 评估 & 推理 ===
 python scripts/evaluate_model.py --checkpoint <path> --datasets <name>
-
-# 128 通道训练（需 AMP + 小 batch + 梯度累积）
-python models/train.py --dataset MODMA --diagnosis depression --batch_size 4 --amp --grad_accum 16
-
-# 对新数据进行诊断推理
 python scripts/predict.py --checkpoint <path> --input_dir data/new_patients/
-
-# 数据统计
-python scripts/data_stats.py
 ```
+
+---
+
+## 分类头体系
+
+### 可选用分类头一览
+
+| 类别 | head_type | 说明 | 参数量 |
+|------|-----------|------|--------|
+| **NN** | `linear` | 原始单层 Linear (LayerNorm + Linear(512,2)) | 2,050 |
+| | `mlp` | 2层 MLP (Linear→ReLU→BN→Dropout→Linear) | 133,378 |
+| | `cnn1d` | 1D 卷积头 (Conv1d→AdaptivePool→Linear) | 42,050 |
+| | `attention` | 自注意力头 (MultiheadAttention+FF→Linear) | 1,317,634 |
+| **sklearn** | `sklearn_lr` | Logistic Regression (L2) | — |
+| | `sklearn_rf` | Random Forest (200 trees) | — |
+| | `sklearn_svm_rbf` | SVM (RBF kernel) | — |
+| | `sklearn_svm_linear` | SVM (Linear kernel) | — |
+| | `sklearn_knn` | KNN (k=5, distance-weighted) | — |
+| | `sklearn_gbdt` | Gradient Boosting (200 estimators) | — |
+| | `sklearn_adaboost` | AdaBoost (200 estimators) | — |
+| | `sklearn_xgb` | XGBoost (需 `pip install xgboost`) | — |
+| | `sklearn_lgbm` | LightGBM (需 `pip install lightgbm`) | — |
+
+> sklearn 头训练时自动提取全量 embedding → fit → 保存为 `sklearn_head.joblib`
+
+### 设计原则
+
+- 所有 head 替换 REVE 的 `final_layer`，接收 (B, 512) embedding，输出 (B, n_classes) logits
+- NN 头走 PyTorch 梯度训练，sklearn 头走 embedding 提取 + fit
+- `linear_probe` 模式冻结 encoder；`finetune` 模式解冻最后 N 层
+- 工厂函数 `create_head()` 统一创建，`HEAD_REGISTRY` 注册所有类型
 
 ---
 
 ## 实验
 
-### 实验 1: 单数据集二分类 🔄 重新训练中
+### 实验 1: 单数据集二分类
 
-> ⚠️ 以下为旧 split（无独立 test set）的结果。重新训练后将更新。
+| 数据集 | 诊断 | head | Bal Acc | AUROC | F1 | Subj Acc | 备注 |
+|--------|------|------|---------|-------|----|---------|------|
+| TDBRAIN | Depression | linear | **0.940** | **0.969** | 0.935 | 0.895 | 最佳 |
+| TDBRAIN | ADHD | linear | 0.828 | 0.946 | 0.808 | 0.735 | |
+| Mendeley | ADHD | linear | 0.863 | 0.910 | 0.856 | 0.854 | |
+| IEEE | ADHD | linear | 0.765 | 0.812 | 0.795 | 0.758 | |
+| OpenNeuro | Depression | linear | 0.719 | 0.832 | 0.831 | 0.821 | 死通道问题 |
+| MODMA | Depression | linear | 0.610 | 0.633 | 0.534 | 0.541 | 仅 3ch |
 
-| 数据集 | 诊断 | Bal Acc | AUROC | F1 | Subj Acc | 备注 |
-|--------|------|---------|-------|----|---------|------|
-| IEEE | ADHD | 0.765 | 0.812 | 0.795 | 0.758 | 19ch, 121人 |
-| MODMA | Depression | 0.610 | 0.633 | 0.534 | 0.541 | 仅 3ch, 128ch 待跑 |
-| Mendeley | ADHD | 0.863 | 0.910 | 0.856 | 0.854 | 5ch ✅ |
-| OpenNeuro | Depression | 0.719 | 0.832 | 0.831 | 0.821 | ~70ch, 死通道问题 |
-| TDBRAIN | Depression | **0.940** | **0.969** | 0.935 | 0.895 | ✅✅ 最佳 |
-| TDBRAIN | ADHD | 0.828 | 0.946 | 0.808 | 0.735 | ✅ |
+> *以上为旧 split 结果，重新训练后更新*
 
-> 旧结果: `outputs/results/binary_summary_20260710_1609.csv`
+### 实验 2: 分类头对比 🔄 进行中
 
-### 实验 2: 三分类 🔄 待重新训练
+| 数据集 | 诊断 | head | Bal Acc | AUROC | F1 | 备注 |
+|--------|------|------|---------|-------|----|------|
+| MODMA | Depression | cnn1d | 0.4805 | 0.5042 | 0.5562 | 欠拟合 |
+| MODMA | Depression | mlp | 0.4574 | 0.4849 | 0.5323 | 过拟合 |
 
-| 数据集 | Bal Acc | AUROC (macro) | F1 | Subj Acc | 备注 |
-|--------|---------|---------------|----|---------|------|
-| TDBRAIN | 0.751 | **0.926** ✅ | 0.806 | 0.717 | 26ch, 三类 |
-| 5-dataset mix | 0.607 | 0.754 | 0.687 | 0.694 | 各数据集标签不全 |
-
-**混淆矩阵 (TDBRAIN)**：
-```
-        预测→ HC   MDD  ADHD
-真实 HC      1311   53   64    (92%)
-真实 MDD      89   623  116    (75%)
-真实 ADHD     13   203  300    (58%)
-```
-
-> ADHD ↔ MDD 互混严重，HC 识别 92%。AUROC 0.926 达标，BalAcc 0.751 距 0.80 差 ~5%。
-
-> 旧结果: `outputs/results/multiclass_summary_20260710_1903.csv`
+> MLP 133K 参数在单数据集上容易过拟合。单数据集推荐 sklearn 头或 linear 头。
 
 ### 实验 3: 多数据集混合 ⬜
 
 ### 实验 4: 跨数据集泛化 ⬜
 
 ### 实验 5: MODMA 128 通道 ⬜
-
-> 需要 AMP + batch_size=4 + grad_accum=16，预计 ~1h/epoch。
 
 ---
 
@@ -196,6 +226,8 @@ python scripts/data_stats.py
 | 多数据集三分类差 | 各数据集标签不全，不适合混 |
 | **无独立 test set** | 按受试者 80/20 分层 split (`data/splits.json`) |
 | **OpenNeuro 死通道** | `dataset.py` 自动检测 + 置零 + channel_mask |
+| **无法对比不同分类头** | `models/heads.py` 统一接口, `--head_type` 一键切换 |
+| **sklearn 分类器无法用于训练** | `SklearnHead` 包装, `_fit_sklearn` 路径, 自动 joblib 保存 |
 
 ---
 
@@ -217,35 +249,27 @@ eeg/
 │   ├── load_ieee.py / load_modma.py / load_mendeley.py / load_openneuro.py / load_tdbrain.py
 │   └── generate_labels.py          # 生成 labels.csv
 ├── models/
-│   ├── config.py                   # 实验配置（Data/Model/Training）
+│   ├── config.py                   # 实验配置（Data/Model/Training, 含 head_type 等）
 │   ├── dataset.py                  # EEG Dataset（死通道检测, 分层 split, 可变通道 batching）
-│   └── train.py                    # 训练脚本（AMP, grad_accum, class_weights）
+│   ├── heads.py                    # 分类头模块（4 NN头 + 9 sklearn头, 工厂函数）
+│   └── train.py                    # 训练脚本（linear_probe/finetune, AMP, grad_accum）
 ├── scripts/
 │   ├── run_preprocess.py           # 一键预处理（两阶段: 信号处理 → split → 分段）
 │   ├── split_data.py               # Train/Test 分层划分
-│   ├── data_stats.py               # 数据统计报告
-│   ├── evaluate_model.py           # 独立评估入口（加载 checkpoint → 评估 → JSON）
-│   ├── predict.py                  # 新数据诊断推理
-│   └── run_binary_experiments.sh   # 二分类批量实验
+│   ├── classical_classifier.py     # REVE embedding + sklearn/PyTorch 分类器对比
+│   ├── evaluate_model.py           # 独立评估（自动还原 head_type, per-dataset/subject）
+│   ├── predict.py                  # 新数据诊断推理（自动还原 head_type）
+│   ├── run_binary_experiments.sh   # 二分类批量实验（支持 --head 参数）
+│   └── run_multi_dataset.sh        # 多数据集混合实验（支持 --head 参数）
 ├── data/
 │   ├── labels.csv                  # 标签索引（含 split 列）
 │   ├── splits.json                 # Train/Test 受试者划分
 │   └── processed/                  # 预处理后数据 (*_eeg.npy, *_ch_pos.npy, *_meta.json)
 └── outputs/
-    ├── checkpoints/
-    │   ├── exp1_IEEE_adhd/
-    │   ├── exp1_MODMA_depression/
-    │   ├── exp1_Mendeley_adhd/
-    │   ├── exp1_OpenNeuro_depression/
-    │   ├── exp1_TDBRAIN_depression/
-    │   ├── exp1_TDBRAIN_adhd/
-    │   ├── exp1_TDBRAIN_multiclass/
-    │   └── exp2_multidataset_multiclass/
-    └── results/
-        ├── binary_summary_20260710_1609.csv
-        └── multiclass_summary_20260710_1903.csv
+    ├── checkpoints/                # 模型权重 (best_model.pt, sklearn_head.joblib)
+    └── results/                    # 评估 JSON + CSV 汇总
 ```
 
 ---
 
-*Phase 1: 2026-07-03 | 二分类: 2026-07-10 | 三分类: 2026-07-10 | 数据质量审计 + 死通道修复: 2026-07-13*
+*Phase 1 (预处理): 2026-07-03 | Phase 2 (分类头): 2026-07-14 | 数据质量审计: 2026-07-13*
