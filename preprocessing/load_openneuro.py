@@ -28,6 +28,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from base_loader import BaseEEGLoader
+from split_utils import load_subject_splits, set_result_split
 
 # 非 EEG 通道（眼电、心电），需从数据中排除
 NON_EEG_CHANNELS = {"HEOG", "VEOG", "EKG", "EOG", "ECG", "EMG", "Trigger", "Status"}
@@ -67,7 +68,7 @@ class OpenNeuroLoader(BaseEEGLoader):
             raw = mne.io.read_raw_eeglab(
                 str(file_path), preload=False, verbose=False
             )
-            raw.load_data()
+            raw.load_data(verbose=False)
 
         all_data = raw.get_data()          # (n_channels, n_samples)
         fs = raw.info["sfreq"]
@@ -131,8 +132,9 @@ class OpenNeuroLoader(BaseEEGLoader):
         try:
             montage = mne.channels.make_standard_montage("standard_1020")
             pos = montage.get_positions()["ch_pos"]
+            pos_lower = {name.lower(): value for name, value in pos.items()}
             positions = np.array([
-                pos.get(ch.upper(), [0.0, 0.0, 0.0]) for ch in ch_names
+                pos_lower.get(ch.lower(), [0.0, 0.0, 0.0]) for ch in ch_names
             ])
         except Exception:
             positions = np.zeros((n_channels, 3))
@@ -204,6 +206,7 @@ def main():
                         help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
     parser.add_argument("--epoch_only", action="store_true",
                         help="只对已有连续数据执行 Step 7 分段，不重新预处理")
+    parser.add_argument("--split_manifest", type=str, default="../data/splits.csv")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -215,7 +218,13 @@ def main():
         print(f"⚠ 未在 {data_dir} 中找到 .set 文件")
         return
 
+    if all(path.stat().st_size < 1024 for path in set_files):
+        print("ERROR: OpenNeuro files are git-annex pointers; EEG payloads are unavailable.",
+              file=sys.stderr)
+        sys.exit(2)
+
     loader = OpenNeuroLoader(args.config)
+    subject_splits = load_subject_splits(args.split_manifest, loader.dataset_name)
 
     # --epoch_only 模式：只对已有连续数据分段
     if args.epoch_only:
@@ -247,6 +256,9 @@ def main():
     skipped = 0
 
     for sid in sorted(subjects.keys()):
+        split = subject_splits.get(sid)
+        if split is None:
+            continue
         # 先检查该受试者是否有有效标签
         label, diag_type = loader._parse_label({"subject_id": sid})
         if label == -1:
@@ -258,10 +270,11 @@ def main():
             run_id = "run01"
             if "run-" in run_file.name:
                 run_id = "run" + run_file.name.split("run-")[1].split("_")[0]
-            out_subj_dir = output_dir / sid / run_id
+            out_subj_dir = output_dir / split / sid / run_id
 
             try:
                 result = loader.process(str(run_file), skip_epoching=args.skip_epoching)
+                set_result_split(result, split)
                 loader.save(result, str(out_subj_dir))
                 total_files += 1
             except Exception as e:

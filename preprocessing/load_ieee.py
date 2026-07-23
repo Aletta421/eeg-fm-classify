@@ -25,6 +25,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from base_loader import BaseEEGLoader
+from split_utils import load_subject_splits, set_result_split
 
 
 class IEEELoader(BaseEEGLoader):
@@ -112,8 +113,9 @@ class IEEELoader(BaseEEGLoader):
         try:
             montage = mne.channels.make_standard_montage("standard_1020")
             pos = montage.get_positions()["ch_pos"]
+            aliases = {"T3": "T7", "T4": "T8", "T5": "P7", "T6": "P8"}
             positions = np.array([
-                pos.get(ch, [0.0, 0.0, 0.0]) for ch in ch_names
+                pos.get(aliases.get(ch, ch), [0.0, 0.0, 0.0]) for ch in ch_names
             ])
         except Exception:
             positions = np.zeros((n_channels, 3))
@@ -143,6 +145,7 @@ def main():
                         help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
     parser.add_argument("--epoch_only", action="store_true",
                         help="只对已有连续数据执行 Step 7 分段，不重新预处理")
+    parser.add_argument("--split_manifest", type=str, default="../data/splits.csv")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -157,6 +160,7 @@ def main():
     }
 
     loader = IEEELoader(args.config)
+    subject_splits = load_subject_splits(args.split_manifest, loader.dataset_name)
 
     # --epoch_only 模式：只对已有连续数据分段
     if args.epoch_only:
@@ -181,10 +185,14 @@ def main():
         print(f"{'='*60}")
 
         for f in mat_files:
+            split = subject_splits.get(f.stem)
+            if split is None:
+                continue
             try:
                 result = loader.process(str(f), skip_epoching=args.skip_epoching)
+                set_result_split(result, split)
                 subj_id = result["meta"]["subject_id"]
-                out_subj_dir = output_dir / subdir_name / subj_id
+                out_subj_dir = output_dir / split / subdir_name / subj_id
                 loader.save(result, str(out_subj_dir))
                 total_files += 1
                 total_subjects += 1

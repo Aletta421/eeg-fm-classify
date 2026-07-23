@@ -43,6 +43,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from base_loader import BaseEEGLoader
+from split_utils import load_subject_splits, set_result_split
 
 FS = 256.0  # Mendeley 数据集固定采样率
 
@@ -135,6 +136,10 @@ class MendeleyLoader(BaseEEGLoader):
             "format": "mendeley_mat",
         }
 
+        duration_seconds = data.shape[1] / FS
+        if duration_seconds < float(self.epoch_cfg["min_duration_sec"]):
+            raise ValueError(f"recording is only {duration_seconds:.2f}s")
+
         channels, ch_positions = self._extract_channels(data, raw_meta)
         eeg = self._preprocess_signal(data, raw_meta)
 
@@ -148,6 +153,8 @@ class MendeleyLoader(BaseEEGLoader):
             "dataset": self.dataset_name,
             "original_fs": FS,
             "n_channels": len(ch_names),
+            "target_fs": self.signal_cfg["target_fs"],
+            "duration_seconds": duration_seconds,
             "diagnosis_type": diag_type,
             "source_file": f"mendeley://{group}/{task_name}/{subject_id}",
             "group": group,
@@ -181,9 +188,12 @@ def main():
                         help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
     parser.add_argument("--epoch_only", action="store_true",
                         help="只对已有连续数据执行 Step 7 分段，不重新预处理")
+    parser.add_argument("--split_manifest", type=str, default="../data/splits.csv")
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir) / "EEG"
+    data_root = Path(args.data_dir)
+    eeg_dirs = [path for path in data_root.rglob("EEG") if path.is_dir()]
+    data_dir = eeg_dirs[0] if eeg_dirs else data_root / "EEG"
     output_dir = Path(args.output_dir)
 
     mat_files = sorted(data_dir.glob("*.mat"))
@@ -195,6 +205,7 @@ def main():
     print(f"配置: target_fs=200 Hz, window=10s, zscore\n")
 
     loader = MendeleyLoader(args.config)
+    subject_splits = load_subject_splits(args.split_manifest, loader.dataset_name)
 
     # --epoch_only 模式：只对已有连续数据分段
     if args.epoch_only:
@@ -229,6 +240,9 @@ def main():
 
         for subj_idx in range(n_subjects):
             subj_id = f"{fname}_{subj_idx+1:02d}"
+            split = subject_splits.get(subj_id)
+            if split is None:
+                continue
 
             for task_idx, task_name, ch_names in TASKS:
                 cell = cell_array[0, task_idx]  # (n_subjects, n_samples, 2)
@@ -249,8 +263,9 @@ def main():
                         label, diag_type, fname, task_name,
                         skip_epoching=args.skip_epoching,
                     )
+                    set_result_split(result, split)
 
-                    out_dir = output_dir / task_name / subj_id
+                    out_dir = output_dir / split / task_name / subj_id
                     loader.save(result, str(out_dir))
                     total_files += 1
 

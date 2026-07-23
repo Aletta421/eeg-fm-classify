@@ -27,6 +27,7 @@ if sys.platform == "win32":
 COLUMNS = [
     "subject_id",
     "dataset",
+    "split",
     "label",              # 0=对照, 1=患者
     "split",              # "train" / "test" / "holdout" (由 split_data.py 确定)
     "file_path",          # 预处理后 .npy 文件路径
@@ -83,6 +84,7 @@ def scan_processed(data_dir: Path) -> List[Dict]:
         record = {
             "subject_id": meta["subject_id"],
             "dataset": meta.get("dataset", "unknown"),
+            "split": meta.get("split", "unknown"),
             "label": meta.get("label", -1),
             "file_path": file_path,
             "n_epochs": n_epochs,
@@ -174,7 +176,7 @@ def main():
         print(f"    {ds}: {count}")
     print(f"  标签分布:")
     for label, count in df["label"].value_counts().sort_index().items():
-        label_name = {0: "对照", 1: "患者"}.get(label, "未知")
+        label_name = {0: "对照", 1: "患者", 2: "ADHD (TDBRAIN)"}.get(label, "未知")
         print(f"    {label} ({label_name}): {count}")
     print(f"  Split 分布:")
     for split_name, count in df["split"].value_counts().items():

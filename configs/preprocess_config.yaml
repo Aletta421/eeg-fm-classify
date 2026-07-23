@@ -27,14 +27,14 @@ normalize:
 epoching:
   window_sec: 10        # 窗口长度（秒）
   overlap_pct: 0.0      # 重叠比例 (0.0-1.0)，0 表示不重叠
-  min_duration_sec: 30  # 最小有效时长（秒），短于此值的数据丢弃
+  min_duration_sec: 10  # REVE: recordings shorter than 10 seconds are discarded
 
 # ----------------------------------------------------------
 # 通道处理
 # ----------------------------------------------------------
 channels:
   montage: "standard_1020"  # 标准蒙太奇名称 (MNE 内置)
-  on_missing: "zero"        # 缺失通道处理: "zero" | "interpolate" | "drop"
+  on_missing: "drop"        # REVE: drop channels without identifiable positions
   reference: null           # 重参考，null 表示保持原参考
 
 # ----------------------------------------------------------

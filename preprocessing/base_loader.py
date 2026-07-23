@@ -37,6 +37,7 @@ EEG 数据集加载器基类
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Tuple, Dict, Any, List
+from fractions import Fraction
 
 import numpy as np
 import yaml
@@ -104,9 +105,36 @@ class BaseEEGLoader(ABC):
 
         # Step 2: 解析标签
         label, diagnosis_type = self._parse_label(raw_meta)
+        if label < 0:
+            raise ValueError("record has no usable diagnosis label")
+
+        original_fs = float(raw_meta.get("fs", self.signal_cfg["target_fs"]))
+        duration_seconds = raw_data.shape[1] / original_fs
+        min_duration = float(self.epoch_cfg["min_duration_sec"])
+        if duration_seconds < min_duration:
+            raise ValueError(
+                f"recording is {duration_seconds:.2f}s; REVE requires at least "
+                f"{min_duration:.2f}s"
+            )
 
         # Step 3: 提取通道信息
         channels, ch_positions = self._extract_channels(raw_data, raw_meta)
+
+        # REVE excludes electrodes whose name/3-D position cannot be identified.
+        ch_positions = np.asarray(ch_positions, dtype=np.float64)
+        if len(channels) != raw_data.shape[0] or ch_positions.shape != (raw_data.shape[0], 3):
+            raise ValueError("channel names/positions do not match EEG channel count")
+        valid_channels = np.array([
+            bool(str(name).strip())
+            and np.all(np.isfinite(pos))
+            and np.linalg.norm(pos) > 0
+            for name, pos in zip(channels, ch_positions)
+        ])
+        if not np.any(valid_channels):
+            raise ValueError("no EEG channel has an identifiable 3-D position")
+        raw_data = raw_data[valid_channels]
+        channels = [name for name, keep in zip(channels, valid_channels) if keep]
+        ch_positions = ch_positions[valid_channels].astype(np.float32)
 
         # Step 1-5: 重采样/滤波/陷波/zscore/clip
         eeg = self._preprocess_signal(raw_data, raw_meta)
@@ -123,6 +151,8 @@ class BaseEEGLoader(ABC):
             "dataset": self.dataset_name,
             "original_fs": raw_meta.get("fs", self.signal_cfg["target_fs"]),
             "n_channels": eeg.shape[0],
+            "target_fs": self.signal_cfg["target_fs"],
+            "duration_seconds": duration_seconds,
             "diagnosis_type": diagnosis_type,
             "source_file": str(file_path),
             **raw_meta,
@@ -148,8 +178,8 @@ class BaseEEGLoader(ABC):
         subj_id = result["meta"]["subject_id"]
 
         if self.out_cfg["format"] == "npy":
-            np.save(output_dir / f"{subj_id}_eeg.npy", result["eeg"])
-            np.save(output_dir / f"{subj_id}_ch_pos.npy", result["ch_positions"])
+            np.save(output_dir / f"{subj_id}_eeg.npy", result["eeg"].astype(np.float32))
+            np.save(output_dir / f"{subj_id}_ch_pos.npy", result["ch_positions"].astype(np.float32))
         elif self.out_cfg["format"] == "pt":
             import torch
             torch.save(torch.tensor(result["eeg"]), output_dir / f"{subj_id}_eeg.pt")
@@ -284,7 +314,7 @@ class BaseEEGLoader(ABC):
             (channel_names, positions)
             channel_names: 通道名列表，长度 = n_channels。
             positions: (n_channels, 3) 电极 3D 坐标数组。
-                       若无位置信息，返回全零数组。
+                       无法识别的位置可返回零坐标，process() 会剔除对应通道。
         """
         ...
 
@@ -316,14 +346,14 @@ class BaseEEGLoader(ABC):
         # Step 5: 极端值裁剪 (±15σ)
         data = self._clip_extremes(data)
 
-        return data
+        return data.astype(np.float32, copy=False)
 
     def _resample(self, data: np.ndarray, orig_fs: float, target_fs: float) -> np.ndarray:
         """重采样到目标采样率。"""
         if orig_fs == target_fs:
             return data
-        n_target = int(data.shape[1] * target_fs / orig_fs)
-        return signal.resample(data, n_target, axis=1)
+        ratio = Fraction(float(target_fs) / float(orig_fs)).limit_denominator(1000)
+        return signal.resample_poly(data, ratio.numerator, ratio.denominator, axis=1)
 
     def _bandpass_filter(self, data: np.ndarray, fs: float) -> np.ndarray:
         """0.5-99.5 Hz 带通滤波。"""
@@ -332,8 +362,8 @@ class BaseEEGLoader(ABC):
         high = self.signal_cfg["highcut"] / nyq
         if high >= 1.0:
             high = 0.99
-        b, a = signal.butter(4, [low, high], btype="band")
-        return signal.filtfilt(b, a, data, axis=1)
+        sos = signal.butter(4, [low, high], btype="band", output="sos")
+        return signal.sosfiltfilt(sos, data, axis=1)
 
     def _notch_filter(self, data: np.ndarray, fs: float) -> np.ndarray:
         """陷波滤波去除工频干扰。"""
@@ -364,16 +394,13 @@ class BaseEEGLoader(ABC):
 
         n_channels, n_total = data.shape
         if n_total < window_samples:
-            # 数据太短：垫零到至少一个窗口
-            padded = np.zeros((n_channels, window_samples))
-            padded[:, :n_total] = data
-            return padded[np.newaxis, ...]
+            raise ValueError("recording is shorter than one 10-second epoch")
 
         epochs = []
         for start in range(0, n_total - window_samples + 1, stride):
             epochs.append(data[:, start : start + window_samples])
 
-        return np.stack(epochs, axis=0)  # (n_epochs, n_channels, n_samples)
+        return np.stack(epochs, axis=0).astype(np.float32, copy=False)
 
     @staticmethod
     def _load_config(config_path: str) -> dict:

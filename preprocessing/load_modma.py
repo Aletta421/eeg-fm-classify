@@ -28,6 +28,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from base_loader import BaseEEGLoader
+from split_utils import load_subject_splits, set_result_split
 
 
 class ModmaLoader(BaseEEGLoader):
@@ -93,9 +94,7 @@ class ModmaLoader(BaseEEGLoader):
         if subtype not in self._loaded_subtypes:
             self._load_labels(subtype)
 
-        label, diag_type = self._label_cache.get(
-            subject_id, (0, "control")
-        )
+        label, diag_type = self._label_cache.get(subject_id, (-1, "excluded"))
         return label, diag_type
 
     def _extract_channels(
@@ -150,7 +149,7 @@ class ModmaLoader(BaseEEGLoader):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             raw = mne.io.read_raw_egi(file_path, preload=False, verbose=False)
-            raw.load_data()
+            raw.load_data(verbose=False)
 
         all_data = raw.get_data()          # (n_channels, n_samples)
         fs = raw.info["sfreq"]
@@ -291,7 +290,7 @@ class ModmaLoader(BaseEEGLoader):
         for row in ws.iter_rows(values_only=True):
             if row[0] is None or row[0] == "subject id":
                 continue
-            subject_id = str(row[0])
+            subject_id = str(row[0]).strip().zfill(8)
             type_label = str(row[1]) if row[1] is not None else "unknown"
 
             if type_label == "MDD":
@@ -341,6 +340,7 @@ def main():
                         help="只跑 Step 1-5, 跳过 Step 7 滑窗分段")
     parser.add_argument("--epoch_only", action="store_true",
                         help="只对已有连续数据执行 Step 7 分段，不重新预处理")
+    parser.add_argument("--split_manifest", type=str, default="../data/splits.csv")
     args = parser.parse_args()
 
     # 子类型与目录的映射
@@ -357,6 +357,7 @@ def main():
         subtype_dirs = {args.subtype: subtype_dirs[args.subtype]}
 
     loader = ModmaLoader(args.config)
+    subject_splits = load_subject_splits(args.split_manifest, loader.dataset_name)
 
     # --epoch_only 模式：只对已有连续数据分段
     if args.epoch_only:
@@ -391,11 +392,15 @@ def main():
 
         skipped = 0
         for sid, files in subjects.items():
-            out_subj_dir = output_dir / subtype / sid
+            split = subject_splits.get(sid)
+            if split is None:
+                continue
+            out_subj_dir = output_dir / split / subtype / sid
 
             for f in files:
                 try:
                     result = loader.process(str(f), skip_epoching=args.skip_epoching)
+                    set_result_split(result, split)
                     loader.save(result, str(out_subj_dir))
                     total_files += 1
                 except Exception as e:
